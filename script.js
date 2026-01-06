@@ -1,36 +1,64 @@
 // --- Constants & Math Functions ---
 const METERS_TO_INCHES = 39.3701;
+const METERS_TO_CENTIMETER = 100.0;
+const METERS_SEC_TO_FT_SEC = 3.28084;
 const METERS_TO_FEET = 3.28084;
 const PA_TO_PSI = 6894.757;
+const PA_TO_KPA = 0.001;
 
-const speedOfSound = (T) => Math.sqrt(1.4 * 8.3144598 * T / 0.0289644);
+const KAPPA = 1.4;
 
-function calculateFlutter(G_psi, cr, ct, b, m, t, P_pa, T_k) {
-    const G = G_psi * PA_TO_PSI;
-    const kappa = 1.4;
-    const t_to_cr = t / cr;
-    const lambda = ct / cr;
-    const S = (cr + ct) * b / 2;
-    const AR = (b ** 2) / S;
-    const Cx = (2 * ct * m + ct**2 + m * cr + cr * ct + cr**2) / (3 * (ct + cr));
-    const epsilon = (Cx / cr) - 0.25;
+function calculateFlutter(shearModulus, rootChord, tipChord, semiSpan, sweep, thickness, alt) {
+    shearModulus = shearModulus * 6.894757;
 
-    const denom = (24 * epsilon / Math.PI) * ((lambda + 1) / 2) * (Math.pow(AR, 3) / (Math.pow(t_to_cr, 3) * (AR + 2)));
-    const finConst = G / denom;
-    const a = speedOfSound(T_k);
+    rootChord = rootChord * METERS_TO_CENTIMETER;
+    tipChord = tipChord * METERS_TO_CENTIMETER;
+    semiSpan = semiSpan * METERS_TO_CENTIMETER;
+    sweep = sweep * METERS_TO_CENTIMETER;
+    thickness = thickness * METERS_TO_CENTIMETER;
 
-    return a * Math.sqrt(finConst / (P_pa * kappa));
+    const Cx = ((2*tipChord*sweep)+(tipChord*tipChord)+(sweep*rootChord)+(tipChord*rootChord)+(rootChord*rootChord))/(3*(tipChord+rootChord))
+
+    const thicknessRatio = thickness / rootChord;
+    const lambda = tipChord / rootChord;
+    const finArea = (rootChord + tipChord) * semiSpan / 2;
+    const aspectRatio = (semiSpan ** 2) / finArea;
+    const epsilon = (Cx / rootChord) - 0.25;
+    const denom = (24 * epsilon * KAPPA * startingPressure) / Math.PI;
+    const Tc = startingTempurature - (0.0065 * alt)
+    const a = 20.05 * Math.sqrt(273.13 + Tc);
+    const p = startingPressure * ((Tc + 273.16)/(startingTempurature+273.16))**5.256;
+    
+    const firstTerm = (denom * aspectRatio**3)/((thicknessRatio)**3 * (aspectRatio + 2))
+    const secondTerm = (lambda+1)/2
+    const thirdTerm = p/startingPressure;
+
+    return a * Math.sqrt((shearModulus)/(firstTerm * secondTerm * thirdTerm));
 }
 
 // --- State ---
 let simulations = [];
 let activeChart = null;
 
+let useMetric = true;
+
+let finRootChord = 0;
+let finTipChord = 0;
+let finSemiSpan = 0;
+let finSweep = 0;
+let finThickness = 0;
+
+let startingPressure;
+let startingTempurature;
+
+let simRan = false;
+
 // --- UI Logic ---
 const fileInput = document.getElementById('fileInput');
 const materialSelect = document.getElementById('material');
 const calculateBtn = document.getElementById('calculateBtn');
 const simSelector = document.getElementById('simSelector');
+const unitSelector = document.getElementById('unitSelector');
 
 materialSelect.addEventListener('change', (e) => {
     document.getElementById('customGContainer').classList.toggle('hidden', e.target.value !== 'custom');
@@ -51,11 +79,13 @@ fileInput.addEventListener('change', async (e) => {
         // 1. Extract Fin Params
         const finset = xmlDoc.getElementsByTagName('trapezoidfinset')[0];
         if (finset) {
-            document.getElementById('rootChord').value = (parseFloat(finset.getElementsByTagName('rootchord')[0].textContent) * METERS_TO_INCHES).toFixed(3);
-            document.getElementById('tipChord').value = (parseFloat(finset.getElementsByTagName('tipchord')[0].textContent) * METERS_TO_INCHES).toFixed(3);
-            document.getElementById('semiSpan').value = (parseFloat(finset.getElementsByTagName('height')[0].textContent) * METERS_TO_INCHES).toFixed(3);
-            document.getElementById('sweep').value = (parseFloat(finset.getElementsByTagName('sweeplength')[0].textContent) * METERS_TO_INCHES).toFixed(3);
-            document.getElementById('thickness').value = (parseFloat(finset.getElementsByTagName('thickness')[0].textContent) * METERS_TO_INCHES).toFixed(3);
+            finRootChord = parseFloat(finset.getElementsByTagName('rootchord')[0].textContent);
+            finTipChord = parseFloat(finset.getElementsByTagName('tipchord')[0].textContent);
+            finSemiSpan = parseFloat(finset.getElementsByTagName('height')[0].textContent);
+            finSweep = parseFloat(finset.getElementsByTagName('sweeplength')[0].textContent);
+            finThickness = parseFloat(finset.getElementsByTagName('thickness')[0].textContent);
+
+            updateUnits();
         }
 
         // 2. Extract Simulations
@@ -79,14 +109,17 @@ fileInput.addEventListener('change', async (e) => {
 
                 dataPoints.push({
                     time: point['Time'],
-                    alt: point['Altitude above sea level'] * METERS_TO_FEET,
-                    vel: point['Vertical velocity'] * METERS_TO_FEET,
+                    alt: point['Altitude above sea level'],
+                    vel: point['Vertical velocity'],
                     pres: point['Air pressure'], 
                     temp: point['Air temperature'] 
                 });
             }
             if (dataPoints.length > 0) simulations.push({ name, data: dataPoints });
         }
+
+        startingPressure = simulations[0]["data"][0]["pres"] * PA_TO_KPA;
+        startingTempurature = simulations[0]["data"][0]["temp"] - 272.15;
 
         if (simulations.length > 0) {
             document.getElementById('simSelectorContainer').classList.remove('hidden');
@@ -101,17 +134,13 @@ fileInput.addEventListener('change', async (e) => {
 
 calculateBtn.addEventListener('click', runAnalysis);
 simSelector.addEventListener('change', runAnalysis);
+unitSelector.addEventListener('change', updateUnits)
 
 function runAnalysis() {
     const simIdx = simSelector.value;
     if (!simulations[simIdx]) return;
 
-    const G = materialSelect.value === 'custom' ? parseFloat(document.getElementById('customG').value) : parseFloat(materialSelect.value);
-    const cr = parseFloat(document.getElementById('rootChord').value);
-    const ct = parseFloat(document.getElementById('tipChord').value);
-    const b = parseFloat(document.getElementById('semiSpan').value);
-    const m = parseFloat(document.getElementById('sweep').value);
-    const t = parseFloat(document.getElementById('thickness').value);
+    const shearModulus = materialSelect.value === 'custom' ? parseFloat(document.getElementById('customG').value) : parseFloat(materialSelect.value);
 
     const rawData = simulations[simIdx].data;
     const processed = [];
@@ -121,9 +150,13 @@ function runAnalysis() {
     for (let i = 0; i < rawData.length; i++) {
         if (i > 0 && rawData[i].alt < rawData[i-1].alt) break;
 
-        const flutterVel = calculateFlutter(G, cr, ct, b, m, t, rawData[i].pres, rawData[i].temp) * METERS_TO_FEET;
+        const flutterVel = calculateFlutter(
+            shearModulus, finRootChord, finTipChord, 
+            finSemiSpan, finSweep, finThickness, rawData[i].alt
+        );
+
         const margin = flutterVel - rawData[i].vel;
-        const marginPercent = (margin / flutterVel) * 100;
+        const marginPercent = (margin / rawData[i].vel) * 100;
 
         if (margin < minMargin) {
             minMargin = margin;
@@ -138,6 +171,8 @@ function runAnalysis() {
             marginPercent: marginPercent
         });
     }
+
+    simRan = true;
 
     updateUI(processed, minPoint);
 }
@@ -156,7 +191,13 @@ function updateUI(data, min) {
         alertBox.className = "p-4 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-100 mb-6";
     }
 
-    alertBox.innerHTML = `<strong>Min Margin: ${min.marginPercent.toFixed(0)}% (${min.margin.toFixed(1)} ft/s)</strong> at ${min.alt.toFixed(0)} ft altitude (Velocity: ${min.vel.toFixed(1)} ft/s)`;
+    let velocityUnit = useMetric ? "m/s" : "ft/s";
+    let velocityMultiplier = useMetric ? 1 : METERS_SEC_TO_FT_SEC;
+
+    let altitudeUnit = useMetric ? "m" : "ft";
+    let altitudeMultiplier = useMetric ? 1 : METERS_TO_FEET;
+
+    alertBox.innerHTML = `<strong>Min Margin: ${min.marginPercent.toFixed(0)}% (${(min.margin * velocityMultiplier).toFixed(1)} ${velocityUnit})</strong> at ${(min.alt * altitudeMultiplier).toFixed(0)} ${altitudeUnit} altitude (Velocity: ${(min.vel * velocityMultiplier).toFixed(1)} ${velocityUnit})`;
 
     const ctx = document.getElementById('flutterChart').getContext('2d');
     if (activeChart) activeChart.destroy();
@@ -167,24 +208,24 @@ function updateUI(data, min) {
             labels: data.map(d => d.time.toFixed(2)),
             datasets: [
                 {
-                    label: 'Velocity (ft/s)',
-                    data: data.map(d => d.velocity),
+                    label: `Velocity (${velocityUnit})`,
+                    data: data.map(d => d.velocity * velocityMultiplier),
                     borderColor: '#3b82f6',
                     tension: 0.1,
                     pointRadius: 0,
                     yAxisID: 'y'
                 },
                 {
-                    label: 'Flutter Velocity (ft/s)',
-                    data: data.map(d => d.flutter),
+                    label: `Flutter Velocity (${velocityUnit})`,
+                    data: data.map(d => d.flutter * velocityMultiplier),
                     borderColor: '#f97316',
                     tension: 0.1,
                     pointRadius: 0,
                     yAxisID: 'y'
                 },
                 {
-                    label: 'Margin (ft/s)',
-                    data: data.map(d => d.margin),
+                    label: `Margin (${velocityUnit})`,
+                    data: data.map(d => d.margin * velocityMultiplier),
                     borderColor: '#10b981',
                     tension: 0.1,
                     pointRadius: 0,
@@ -199,10 +240,35 @@ function updateUI(data, min) {
             scales: {
                 x: { title: { display: true, text: 'Time (s)' } },
                 y: {
-                    title: { display: true, text: 'Velocity (ft/s)' },
+                    title: { display: true, text: `Velocity (${velocityUnit})` },
                     position: 'left'
                 }
             }
         }
     });
+}
+
+function updateUnits()
+{
+
+    useMetric = unitSelector.value == 'metric'
+
+    const unitMultiplier = useMetric ? METERS_TO_CENTIMETER : METERS_TO_INCHES;
+    const distanceUnit = useMetric ? "mm" : "in";
+
+    document.getElementById('rootChordUnit').innerHTML = distanceUnit;
+    document.getElementById('tipChordUnit').innerHTML = distanceUnit;
+    document.getElementById('semiSpanUnit').innerHTML = distanceUnit;
+    document.getElementById('sweepUnit').innerHTML = distanceUnit;
+    document.getElementById('thicknessUnit').innerHTML = distanceUnit;
+
+
+    document.getElementById('rootChord').value = (finRootChord * unitMultiplier).toFixed(3);
+    document.getElementById('tipChord').value = (finTipChord * unitMultiplier).toFixed(3);
+    document.getElementById('semiSpan').value = (finSemiSpan * unitMultiplier).toFixed(3);
+    document.getElementById('sweep').value = (finSweep * unitMultiplier).toFixed(3);
+    document.getElementById('thickness').value = (finThickness * unitMultiplier).toFixed(3);
+
+
+    if (simRan) runAnalysis();
 }
